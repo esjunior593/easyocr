@@ -3,3 +3,4 @@ easyocr
 torch
 pillow
 numpy
+requests

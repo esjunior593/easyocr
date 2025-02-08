@@ -2,7 +2,8 @@ from flask import Flask, request, jsonify
 import easyocr
 import numpy as np
 from PIL import Image
-import io
+import requests
+from io import BytesIO
 
 app = Flask(__name__)
 
@@ -11,13 +12,22 @@ reader = easyocr.Reader(['en', 'es'])  # Inglés y español
 
 @app.route('/ocr', methods=['POST'])
 def ocr():
-    # Verifica si se envió una imagen
-    if 'image' not in request.files:
-        return jsonify({"error": "No image provided"}), 400
+    # Verifica si se envió una URL
+    if 'url' not in request.json:
+        return jsonify({"error": "No URL provided"}), 400
 
-    # Lee la imagen
-    image_file = request.files['image']
-    image = Image.open(image_file).convert('RGB')  # Convierte a RGB
+    # Obtén la URL de la imagen
+    image_url = request.json['url']
+
+    # Descarga la imagen desde la URL
+    try:
+        response = requests.get(image_url)
+        response.raise_for_status()  # Lanza un error si la descarga falla
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"Failed to download image: {str(e)}"}), 400
+
+    # Convierte la imagen a un formato que EasyOCR pueda procesar
+    image = Image.open(BytesIO(response.content)).convert('RGB')
     image_np = np.array(image)  # Convierte a un array de NumPy
 
     # Procesa la imagen con EasyOCR
