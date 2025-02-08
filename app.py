@@ -1,92 +1,84 @@
-import easyocr
+import flask
 import requests
-import cv2
+import easyocr
 import numpy as np
-import os
-from flask import Flask, request, jsonify
+import cv2
+import io
+from PIL import Image
 
-app = Flask(__name__)
+app = flask.Flask(__name__)
 
-# 🔹 Función para descargar la imagen desde una URL
-def descargar_imagen(image_url):
+# Inicializar OCR
+reader = easyocr.Reader(['es'])
+
+def analizar_ela(imagen_url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}  # Evitar bloqueos por política de User-Agent
-        response = requests.get(image_url, headers=headers, stream=True)
+        # Descargar imagen desde URL
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(imagen_url, headers=headers)
         response.raise_for_status()
 
-        image_path = "temp.jpg"
-        with open(image_path, "wb") as file:
-            for chunk in response.iter_content(1024):
-                file.write(chunk)
+        # Convertir la imagen a formato PIL
+        imagen = Image.open(io.BytesIO(response.content)).convert('RGB')
 
-        return image_path
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Error al descargar la imagen: {str(e)}")
+        # Guardar versión comprimida
+        imagen_comprimida = io.BytesIO()
+        imagen.save(imagen_comprimida, format='JPEG', quality=85)
+        imagen_comprimida = Image.open(imagen_comprimida)
 
-# 🔹 Función para analizar ediciones con ELA (Error Level Analysis)
-def analizar_ela(ruta_imagen):
-    try:
-        # Cargar la imagen original
-        imagen = cv2.imread(ruta_imagen)
+        # Convertir ambas imágenes a matrices NumPy
+        original = np.array(imagen, dtype=np.float32)
+        comprimida = np.array(imagen_comprimida, dtype=np.float32)
 
-        # Guardar la imagen con menor calidad para detectar diferencias
-        cv2.imwrite("temp_recomp.jpg", imagen, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        imagen_recomp = cv2.imread("temp_recomp.jpg")
+        # Calcular el Error Level Analysis (ELA)
+        diferencia = np.abs(original - comprimida)
+        intensidad_ela = np.mean(diferencia)
 
-        # Comparar la imagen original con la recomprimida
-        ela = cv2.absdiff(imagen, imagen_recomp)
-        _, resultado = cv2.threshold(ela, 15, 255, cv2.THRESH_BINARY)
+        print(f"📊 Intensidad de ELA detectada: {intensidad_ela}")
 
-        # Calcular el porcentaje de píxeles modificados
-        porcentaje_editado = np.sum(resultado) / np.prod(resultado.shape) * 100
+        # Si la diferencia es alta, indicar que la imagen fue editada
+        if intensidad_ela > 10:  # Puedes ajustar este umbral
+            return {"editado": True, "nivel": intensidad_ela}
 
-        os.remove("temp_recomp.jpg")  # Eliminar imagen temporal
+        return {"editado": False, "nivel": intensidad_ela}
 
-        if porcentaje_editado > 10:  # 🔹 Umbral de edición (ajustable)
-            return "❌ Posible edición detectada en el comprobante."
-        return "✅ No se detectaron ediciones."
     except Exception as e:
-        return f"⚠️ Error en la validación de edición: {str(e)}"
+        return {"error": f"Error en ELA: {str(e)}"}
 
-# 🔹 Función para procesar la imagen con EasyOCR
-def procesar_ocr(ruta_imagen):
-    reader = easyocr.Reader(["es"])  # Cargar modelo en español
-    text = reader.readtext(ruta_imagen, detail=0)
-    return " ".join(text)
-
-# 🔹 Endpoint para recibir imágenes y procesarlas con validación de edición
 @app.route('/ocr', methods=['POST'])
-def ocr():
-    data = request.get_json()
-    image_url = data.get("imageUrl")
+def procesar_ocr():
+    data = flask.request.get_json()
+    
+    if not data or 'image_url' not in data:
+        return flask.jsonify({"error": "❌ Falta la URL de la imagen"}), 400
 
-    if not image_url:
-        return jsonify({"error": "❌ Falta la URL de la imagen"}), 400
+    imagen_url = data['image_url']
+
+    # 🔎 **Verificar si la imagen ha sido editada con ELA**
+    resultado_ela = analizar_ela(imagen_url)
+    
+    if resultado_ela.get("editado"):
+        return flask.jsonify({
+            "error": "🚨 Comprobante sospechoso de haber sido editado.",
+            "detalle": f"❌ Posible edición detectada en el comprobante (Nivel de ELA: {resultado_ela['nivel']:.2f})."
+        }), 400
 
     try:
-        # 1️⃣ Descargar la imagen
-        image_path = descargar_imagen(image_url)
+        # **Descargar la imagen**
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(imagen_url, headers=headers)
+        response.raise_for_status()
+        
+        # Convertir la imagen en formato compatible con EasyOCR
+        image_bytes = io.BytesIO(response.content)
 
-        # 2️⃣ Verificar si la imagen fue editada con ELA
-        resultado_ela = analizar_ela(image_path)
-        print(resultado_ela)
+        # **Extraer texto con EasyOCR**
+        text_result = reader.readtext(np.array(Image.open(image_bytes)), detail=0)
 
-        # 3️⃣ Si detecta edición, rechazar el comprobante
-        if "❌" in resultado_ela:
-            os.remove(image_path)  # Eliminar imagen descargada
-            return jsonify({
-                "error": "🚨 Comprobante sospechoso de haber sido editado.",
-                "detalle": resultado_ela
-            }), 400
-
-        # 4️⃣ Si no fue editado, procesar con EasyOCR
-        texto_extraido = procesar_ocr(image_path)
-        os.remove(image_path)  # Eliminar imagen después del procesamiento
-
-        return jsonify({"texto": texto_extraido, "validacion": resultado_ela})
+        return flask.jsonify({"text": " ".join(text_result)})
 
     except Exception as e:
-        return jsonify({"error": f"⚠️ Error en el procesamiento de OCR: {str(e)}"}), 500
+        return flask.jsonify({"error": f"Error en el procesamiento de OCR: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host='0.0.0.0', port=8080)
