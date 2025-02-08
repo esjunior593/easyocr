@@ -1,65 +1,92 @@
-from flask import Flask, request, jsonify
 import easyocr
 import requests
+import cv2
+import numpy as np
 import os
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Inicializar el lector de EasyOCR con español
-reader = easyocr.Reader(['es'])  
-
+# 🔹 Función para descargar la imagen desde una URL
 def descargar_imagen(image_url):
-    """Descarga una imagen desde una URL y la guarda temporalmente."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-    }
-
     try:
+        headers = {"User-Agent": "Mozilla/5.0"}  # Evitar bloqueos por política de User-Agent
         response = requests.get(image_url, headers=headers, stream=True)
-        response.raise_for_status()  # Verifica errores en la descarga
-        
+        response.raise_for_status()
+
         image_path = "temp.jpg"
         with open(image_path, "wb") as file:
             for chunk in response.iter_content(1024):
                 file.write(chunk)
 
         return image_path
-
     except requests.exceptions.RequestException as e:
-        return {"error": f"No se pudo descargar la imagen: {e}"}
+        raise Exception(f"Error al descargar la imagen: {str(e)}")
 
-
-def procesar_ocr(image_url):
-    """Procesa la imagen con EasyOCR y devuelve el texto detectado."""
-    image_path = descargar_imagen(image_url)
-
-    # Si hay un error en la descarga, devolverlo
-    if isinstance(image_path, dict):
-        return image_path  
-
+# 🔹 Función para analizar ediciones con ELA (Error Level Analysis)
+def analizar_ela(ruta_imagen):
     try:
-        # Procesar la imagen con EasyOCR
-        resultado = reader.readtext(image_path, detail=0)  # detail=0 devuelve solo el texto
+        # Cargar la imagen original
+        imagen = cv2.imread(ruta_imagen)
 
-        os.remove(image_path)  # Eliminar la imagen temporal después del OCR
+        # Guardar la imagen con menor calidad para detectar diferencias
+        cv2.imwrite("temp_recomp.jpg", imagen, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        imagen_recomp = cv2.imread("temp_recomp.jpg")
 
-        return {"text": " ".join(resultado)}
+        # Comparar la imagen original con la recomprimida
+        ela = cv2.absdiff(imagen, imagen_recomp)
+        _, resultado = cv2.threshold(ela, 15, 255, cv2.THRESH_BINARY)
 
+        # Calcular el porcentaje de píxeles modificados
+        porcentaje_editado = np.sum(resultado) / np.prod(resultado.shape) * 100
+
+        os.remove("temp_recomp.jpg")  # Eliminar imagen temporal
+
+        if porcentaje_editado > 10:  # 🔹 Umbral de edición (ajustable)
+            return "❌ Posible edición detectada en el comprobante."
+        return "✅ No se detectaron ediciones."
     except Exception as e:
-        return {"error": f"Error en el procesamiento de OCR: {str(e)}"}
+        return f"⚠️ Error en la validación de edición: {str(e)}"
 
+# 🔹 Función para procesar la imagen con EasyOCR
+def procesar_ocr(ruta_imagen):
+    reader = easyocr.Reader(["es"])  # Cargar modelo en español
+    text = reader.readtext(ruta_imagen, detail=0)
+    return " ".join(text)
 
+# 🔹 Endpoint para recibir imágenes y procesarlas con validación de edición
 @app.route('/ocr', methods=['POST'])
 def ocr():
-    """Endpoint para recibir una URL y procesar OCR."""
-    data = request.json
+    data = request.get_json()
+    image_url = data.get("imageUrl")
 
-    if not data or "image_url" not in data:
-        return jsonify({"error": "Falta la URL de la imagen"}), 400
+    if not image_url:
+        return jsonify({"error": "❌ Falta la URL de la imagen"}), 400
 
-    resultado_ocr = procesar_ocr(data["image_url"])
-    return jsonify(resultado_ocr)
+    try:
+        # 1️⃣ Descargar la imagen
+        image_path = descargar_imagen(image_url)
 
+        # 2️⃣ Verificar si la imagen fue editada con ELA
+        resultado_ela = analizar_ela(image_path)
+        print(resultado_ela)
+
+        # 3️⃣ Si detecta edición, rechazar el comprobante
+        if "❌" in resultado_ela:
+            os.remove(image_path)  # Eliminar imagen descargada
+            return jsonify({
+                "error": "🚨 Comprobante sospechoso de haber sido editado.",
+                "detalle": resultado_ela
+            }), 400
+
+        # 4️⃣ Si no fue editado, procesar con EasyOCR
+        texto_extraido = procesar_ocr(image_path)
+        os.remove(image_path)  # Eliminar imagen después del procesamiento
+
+        return jsonify({"texto": texto_extraido, "validacion": resultado_ela})
+
+    except Exception as e:
+        return jsonify({"error": f"⚠️ Error en el procesamiento de OCR: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=8080)
