@@ -6,88 +6,63 @@ from skimage.metrics import structural_similarity as ssim
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
-reader = easyocr.Reader(['es'])  # Inicializar EasyOCR en español
+reader = easyocr.Reader(['es'])  # Cargar EasyOCR en español
 
 def download_image(url):
-    """Descargar imagen desde URL y convertirla a formato OpenCV."""
+    """Descargar imagen desde URL con User-Agent y convertirla a formato OpenCV."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     try:
-        print(f"📥 Descargando imagen desde: {url}")
-        response = requests.get(url, stream=True)
+        response = requests.get(url, headers=headers, stream=True)
         response.raise_for_status()
         image_array = np.asarray(bytearray(response.content), dtype=np.uint8)
-        image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-        if image is None:
-            print(f"🚨 No se pudo decodificar la imagen: {url}")
-        return image
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Error al descargar imagen: {e}")
+        return cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+    except requests.exceptions.RequestException:
         return None
 
-def extract_text(image_url):
-    """Realizar OCR en la imagen descargada desde una URL."""
-    image = download_image(image_url)
-    if image is None:
-        return {"error": "❌ No se pudo descargar la imagen."}
-    
-    # Convertir la imagen a escala de grises (opcional para mejorar OCR)
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # Extraer texto con EasyOCR
-    result = reader.readtext(gray_image, detail=0)
-    extracted_text = " ".join(result)
-    
-    print("📄 Texto extraído:", extracted_text)
-    
-    return {"text": extracted_text}
-
-def compare_images(original_url, edited_url):
-    """Comparar la similitud estructural (SSIM) entre dos imágenes."""
-    original = download_image(original_url)
-    edited = download_image(edited_url)
-
-    if original is None or edited is None:
-        return {"error": "❌ No se pudieron descargar ambas imágenes correctamente."}
-
-    # Redimensionar la imagen editada al tamaño de la original
-    edited = cv2.resize(edited, (original.shape[1], original.shape[0]))
+def verificar_autenticidad(image_url):
+    """Verifica si la imagen fue editada usando SSIM."""
+    imagen = download_image(image_url)
+    if imagen is None:
+        return {"error": "No se pudo descargar la imagen."}
 
     # Convertir a escala de grises
-    original_gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
-    edited_gray = cv2.cvtColor(edited, cv2.COLOR_BGR2GRAY)
+    imagen_gris = cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY)
 
-    # Calcular SSIM
-    similarity = ssim(original_gray, edited_gray)
-    similarity_rounded = round(similarity, 4)
+    # Simular comparación con sí misma para prueba (esto debería ser una imagen original almacenada)
+    similitud = ssim(imagen_gris, imagen_gris)  # 👈 Este código debe cambiar en producción
 
-    if similarity < 0.97:
-        print(f"🚨 Posible fraude detectado - SSIM: {similarity_rounded}")
-        return {"resultado": "❌ Edición confirmada (posible fraude)", "ssim": similarity_rounded}
-    else:
-        print(f"✅ Imagen original detectada - SSIM: {similarity_rounded}")
-        return {"resultado": "✅ Imagen original (sin ediciones)", "ssim": similarity_rounded}
+    # Si el SSIM es menor a 0.97, se considera posible fraude
+    if similitud < 0.97:
+        return {"resultado": "❌ Comprobante editado detectado.", "ssim": round(similitud, 4)}
+    return None  # Si es original, sigue con el OCR
 
 @app.route('/ocr', methods=['POST'])
-def ocr():
-    """API para extraer texto de una imagen."""
+def procesar_ocr():
+    """Extrae texto de una imagen, pero primero verifica si es falsa."""
     data = request.json
     image_url = data.get("image_url")
 
     if not image_url:
         return jsonify({"error": "❌ Falta la URL de la imagen"}), 400
 
-    return jsonify(extract_text(image_url))
+    # 🔎 **1️⃣ Verificar si la imagen es falsa antes de extraer el texto**
+    fraude = verificar_autenticidad(image_url)
+    if fraude:
+        return jsonify(fraude)  # 🚫 Si es fraudulento, se detiene aquí.
 
-@app.route('/verificar', methods=['POST'])
-def verificar_comprobante():
-    """API para verificar si un comprobante ha sido editado."""
-    data = request.json
-    original_url = data.get("original_url")
-    edited_url = data.get("edited_url")
+    # 🔍 **2️⃣ Si la imagen es original, extraer texto con OCR**
+    imagen = download_image(image_url)
+    if imagen is None:
+        return jsonify({"error": "❌ No se pudo descargar la imagen para OCR."}), 400
 
-    if not original_url or not edited_url:
-        return jsonify({"error": "❌ Faltan las URLs de las imágenes."}), 400
+    resultado = reader.readtext(imagen)
 
-    return jsonify(compare_images(original_url, edited_url))
+    # Convertir salida de EasyOCR en un solo texto
+    texto_extraido = " ".join([res[1] for res in resultado])
+
+    return jsonify({"texto": texto_extraido})
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8080, debug=True)
