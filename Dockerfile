@@ -8,4 +8,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "server:app"]
+# Ejecuta Gunicorn con 4 workers
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app"]
