@@ -26,7 +26,7 @@ def process_ocr():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    from waitress import serve  # Mejor rendimiento en producción
-    serve(app, host='0.0.0.0', port=8080)
+if __name__ == "__main__":
+    from server import app
+    app.run(host="0.0.0.0", port=8080)
 
